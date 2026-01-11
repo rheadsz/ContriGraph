@@ -40,8 +40,72 @@ async function fetchIssues() {
   }
 }
 
+async function extractFilePath(issue){
+    const prompt = `You are an expert Python developer. Analyze this GitHub issue and respond ONLY with the most relevant source code file path in the LangChain repository. Use Unix-style relative paths ending with .py. If no file is clearly mentioned, respond "unknown".
+
+Examples:
+- Input: "Redis cache TTL bug" → Output: langchain/cache/redis.py
+- Input: "Docs typo" → Output: unknown
+
+Now analyze:
+
+Title: ${issue.title}
+Body: ${issue.body || ''}
+
+Output:`;
+
+    try{
+        //using Ollama's HTTP API which runs on localhost:11434 by default
+        const response = await axios.post('http://localhost:11434/api/generate',{
+            model: 'qwen2:7b',
+            prompt: prompt,
+            stream: false,
+            options: {
+                temperature: 0.7,
+               
+            }
+        });
+
+    let rawResponse = response.data.response.trim();
+
+    // Clean common artifacts
+    rawResponse = rawResponse
+      .split('\n')[0]
+      .replace(/^[>"'\s]+|[>"'\s]+$/g, '')
+      .replace(/```.*$/, '');
+
+    // Validate: must be a clean .py path
+    if (
+      rawResponse === 'unknown' ||
+      rawResponse.includes(' ') ||
+      rawResponse.length > 80 ||
+      !rawResponse.endsWith('.py')
+    ) {
+      return 'unknown';
+    }
+        
+    console.log(`Issue #${issue.id}: ${rawResponse}`);
+    return rawResponse;
+
+    } catch (error){
+        console.error(`Failed to process issue #${issue.id}:`, error.message);
+        return 'unknown';
+    }
+
+
+
+}
+
+
+
 // Run it
-fetchIssues().then(issues => {
-  console.log('\nSample issue:');
-  console.log(JSON.stringify(issues[0], null, 2));
+fetchIssues().then(async (issues) => {
+  console.log('\n Extracting file paths with Qwen...\n');
+  
+  // Processing first 5 issues as a test
+  const sampleIssues = issues.slice(0, 5);
+  for (const issue of sampleIssues) {
+    await extractFilePath(issue);
+  }
 });
+
