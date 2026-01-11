@@ -96,16 +96,56 @@ Output:`;
 
 }
 
+const neo4j = require('neo4j-driver')
+const neo4jDriver = neo4j.driver(
+  process.env.NEO4J_URI,
+  neo4j.auth.basic(process.env.NEO4J_USER, process.env.NEO4J_PASSWORD)
+);
 
-
-// Run it
-fetchIssues().then(async (issues) => {
-  console.log('\n Extracting file paths with Qwen...\n');
-  
-  // Processing first 5 issues as a test
-  const sampleIssues = issues.slice(0, 5);
-  for (const issue of sampleIssues) {
-    await extractFilePath(issue);
+async function saveToNeo4j(issue, filePath) {
+  const session = neo4jDriver.session();
+  try {
+    await session.executeWrite(tx =>
+      tx.run(
+        `
+        MERGE (i:Issue {id: $issueId})
+          ON CREATE SET i.title = $title, i.url = $url
+        MERGE (f:File {path: $filePath})
+        MERGE (i)-[:RELATES_TO]->(f)
+        `,
+        {
+          issueId: issue.id,
+          title: issue.title,
+          url: issue.url,
+          filePath: filePath,
+        }
+      )
+    );
+    console.log(`Saved Issue #${issue.id} → ${filePath}`);
+  } catch (error) {
+    console.error(`Failed to save Issue #${issue.id}:`, error.message);
+  } finally {
+    await session.close();
   }
+}
+
+
+
+
+
+fetchIssues().then(async (issues) => {
+  console.log('\nExtracting file paths with Qwen...\n');
+  
+  const sampleIssues = issues.slice(0, 5); 
+  for (const issue of sampleIssues) {
+    const filePath = await extractFilePath(issue);
+    if (filePath !== 'unknown') {
+      await saveToNeo4j(issue, filePath);
+    }
+  }
+
+  // Clean shutdown
+  await neo4jDriver.close();
+  console.log('\nIngestion complete!');
 });
 
