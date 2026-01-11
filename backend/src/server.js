@@ -6,7 +6,7 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Enable CORS (so frontend can call backend)
+// Enabled CORS (so frontend can call backend)
 app.use(cors());
 
 // Parse JSON request bodies
