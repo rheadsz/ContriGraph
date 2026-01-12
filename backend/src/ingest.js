@@ -3,15 +3,13 @@ require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') }
 const axios = require('axios');
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const REPO_OWNER = 'langchain-ai';
-const REPO_NAME = 'langchain';
 
-async function fetchIssues() {
-  console.log('Fetching issues from GitHub...');
+async function fetchIssues(repoOwner, repoName) {
+  console.log(`Fetching issues from ${repoOwner}/${repoName}...`);
   
   try {
     const response = await axios.get(
-      `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues`,
+      `https://api.github.com/repos/${repoOwner}/${repoName}/issues`,
       {
         headers: {
           Authorization: `Bearer ${GITHUB_TOKEN}`,
@@ -19,7 +17,7 @@ async function fetchIssues() {
         },
         params: {
           state: 'open',
-          per_page: 30,               // Start small for testing
+          per_page: 100,
         },
       }
     );
@@ -30,6 +28,12 @@ async function fetchIssues() {
       body: issue.body || '',
       url: issue.html_url,
       labels: issue.labels.map(l => l.name),
+      comments: issue.comments || 0,
+      repo: `${repoOwner}/${repoName}`,
+      assignees: issue.assignees.map(a => a.login),
+      state: issue.state,
+      createdAt: issue.created_at,
+      updatedAt: issue.updated_at,
     }));
 
     console.log(`Fetched ${issues.length} issues`);
@@ -108,16 +112,41 @@ async function saveToNeo4j(issue, filePath) {
     await session.executeWrite(tx =>
       tx.run(
         `
-        MERGE (i:Issue {id: $issueId})
-          ON CREATE SET i.title = $title, i.url = $url
+        MERGE (i:Issue {id: $issueId, repo: $repo})
+          ON CREATE SET i.title = $title, i.url = $url, i.comments = $comments,
+                        i.state = $state, i.createdAt = $createdAt, i.updatedAt = $updatedAt,
+                        i.isAvailable = $isAvailable
+          ON MATCH SET i.title = $title, i.url = $url, i.comments = $comments,
+                       i.state = $state, i.updatedAt = $updatedAt,
+                       i.isAvailable = $isAvailable
         MERGE (f:File {path: $filePath})
         MERGE (i)-[:RELATES_TO]->(f)
+        
+        WITH i
+        UNWIND $labels AS labelName
+        MERGE (l:Label {name: labelName})
+        MERGE (i)-[:HAS_LABEL]->(l)
+        
+        WITH i
+        UNWIND CASE WHEN size($assignees) > 0 THEN $assignees ELSE [null] END AS assignee
+        FOREACH (a IN CASE WHEN assignee IS NOT NULL THEN [assignee] ELSE [] END |
+          MERGE (u:User {username: a})
+          MERGE (i)-[:ASSIGNED_TO]->(u)
+        )
         `,
         {
           issueId: issue.id,
+          repo: issue.repo,
           title: issue.title,
           url: issue.url,
+          comments: issue.comments,
+          state: issue.state,
+          createdAt: issue.createdAt,
+          updatedAt: issue.updatedAt,
+          isAvailable: issue.assignees.length === 0,
           filePath: filePath,
+          labels: issue.labels,
+          assignees: issue.assignees,
         }
       )
     );
@@ -133,19 +162,40 @@ async function saveToNeo4j(issue, filePath) {
 
 
 
-fetchIssues().then(async (issues) => {
+// Configuration: Add more repositories here
+const REPOS = [
+  { owner: 'langchain-ai', name: 'langchain' },
+  // Add more repos as needed
+];
+
+async function ingestRepository(repoOwner, repoName) {
+  console.log(`\n=== Processing ${repoOwner}/${repoName} ===\n`);
+  
+  const issues = await fetchIssues(repoOwner, repoName);
   console.log('\nExtracting file paths with Qwen...\n');
   
-  const sampleIssues = issues.slice(0, 5); 
+  const sampleIssues = issues.slice(0, 30);
   for (const issue of sampleIssues) {
     const filePath = await extractFilePath(issue);
     if (filePath !== 'unknown') {
       await saveToNeo4j(issue, filePath);
     }
   }
+}
 
-  // Clean shutdown
-  await neo4jDriver.close();
-  console.log('\nIngestion complete!');
-});
+// Main execution
+(async () => {
+  try {
+    for (const repo of REPOS) {
+      await ingestRepository(repo.owner, repo.name);
+    }
+    
+    await neo4jDriver.close();
+    console.log('\n=== Ingestion complete for all repositories! ===');
+  } catch (error) {
+    console.error('Ingestion failed:', error);
+    await neo4jDriver.close();
+    process.exit(1);
+  }
+})();
 
